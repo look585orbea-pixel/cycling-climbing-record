@@ -468,6 +468,8 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
               ) : (
                 <>
                   <LeafletMapView
+                    key={activity.id}
+                    activityId={activity.id}
                     track={gpxTrack}
                     activityTitle={activity.title}
                     currentPoint={highlightPoint}

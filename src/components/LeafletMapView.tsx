@@ -8,6 +8,7 @@ import { getPrefectureBounds, getPrefectureFullName } from '../utils/prefectureB
 interface LeafletMapViewProps {
   track: GpxTrack | null;
   activityTitle?: string;
+  activityId?: string;
   height?: string;
   currentPoint?: GpxPoint | null;
   prefecture?: string | null;
@@ -50,6 +51,7 @@ type LayerKey = keyof typeof TILE_LAYERS;
 export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
   track,
   activityTitle,
+  activityId,
   height = '100%',
   currentPoint,
   prefecture,
@@ -67,12 +69,26 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
+    // Determine initial center: if no track is present but prefecture is specified, center on that prefecture
+    const initialPrefBounds = (!track || !track.points || track.points.length === 0) && prefecture ? getPrefectureBounds(prefecture) : null;
+    const initialCenter: [number, number] = initialPrefBounds
+      ? [(initialPrefBounds[0][0] + initialPrefBounds[1][0]) / 2, (initialPrefBounds[0][1] + initialPrefBounds[1][1]) / 2]
+      : [35.681236, 139.767125];
+
     const map = L.map(mapContainerRef.current, {
-      center: [35.681236, 139.767125],
-      zoom: 11,
+      center: initialCenter,
+      zoom: initialPrefBounds ? 9 : 11,
       zoomControl: false,
       preferCanvas: true, // Hardware-accelerated Canvas rendering for smooth tablet performance
     });
+
+    if (initialPrefBounds) {
+      map.fitBounds(initialPrefBounds, {
+        padding: [30, 30],
+        maxZoom: 13,
+        animate: false,
+      });
+    }
 
     L.control.zoom({ position: 'topleft' }).addTo(map);
 
@@ -110,7 +126,7 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
     tileLayerRef.current.options.maxZoom = config.maxZoom;
   }, [activeLayer]);
 
-  // Render GPX Track
+  // Render GPX Track or Scroll/Fit to Prefecture
   useEffect(() => {
     const map = mapInstanceRef.current;
     const layerGroup = trackLayersRef.current;
@@ -118,8 +134,37 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
 
     layerGroup.clearLayers();
 
-    if (!track || !track.points || track.points.length === 0) return;
+    // 1. If no track points, scroll and fit map to the activity's prefecture (first prefecture)
+    if (!track || !track.points || track.points.length === 0) {
+      if (prefecture) {
+        const prefBounds = getPrefectureBounds(prefecture);
+        if (prefBounds) {
+          const fitPref = () => {
+            if (!mapInstanceRef.current) return;
+            mapInstanceRef.current.invalidateSize();
+            mapInstanceRef.current.fitBounds(prefBounds, {
+              padding: [30, 30],
+              maxZoom: 13,
+              animate: false,
+            });
+          };
 
+          fitPref();
+          const t1 = setTimeout(fitPref, 60);
+          const t2 = setTimeout(fitPref, 200);
+          const t3 = setTimeout(fitPref, 400);
+
+          return () => {
+            clearTimeout(t1);
+            clearTimeout(t2);
+            clearTimeout(t3);
+          };
+        }
+      }
+      return;
+    }
+
+    // 2. If GPX track exists, render track line and markers
     // If GPX has extreme number of points (e.g. >3000), sample evenly while preserving start and end for smooth rendering on mobile/tablet
     let sampledPoints = track.points;
     if (track.points.length > 3000) {
@@ -242,53 +287,29 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
       layerGroup.addLayer(peakMarker);
     }
 
-    // Auto zoom to track or prefecture reliably
-    if (track && track.points && track.points.length > 0) {
-      const bounds = L.latLngBounds(latlngs);
-      if (bounds.isValid()) {
-        const fitTrack = () => {
-          if (!mapInstanceRef.current) return;
-          mapInstanceRef.current.invalidateSize();
-          mapInstanceRef.current.fitBounds(bounds, {
-            padding: [40, 40],
-            maxZoom: 15,
-            animate: false,
-          });
-        };
+    // Auto zoom to track bounds reliably
+    const bounds = L.latLngBounds(latlngs);
+    if (bounds.isValid()) {
+      const fitTrack = () => {
+        if (!mapInstanceRef.current) return;
+        mapInstanceRef.current.invalidateSize();
+        mapInstanceRef.current.fitBounds(bounds, {
+          padding: [40, 40],
+          maxZoom: 15,
+          animate: false,
+        });
+      };
 
-        fitTrack();
-        const t1 = setTimeout(fitTrack, 60);
-        const t2 = setTimeout(fitTrack, 250);
+      fitTrack();
+      const t1 = setTimeout(fitTrack, 60);
+      const t2 = setTimeout(fitTrack, 250);
 
-        return () => {
-          clearTimeout(t1);
-          clearTimeout(t2);
-        };
-      }
-    } else if (prefecture) {
-      const prefBounds = getPrefectureBounds(prefecture);
-      if (prefBounds) {
-        const fitPref = () => {
-          if (!mapInstanceRef.current) return;
-          mapInstanceRef.current.invalidateSize();
-          mapInstanceRef.current.fitBounds(prefBounds, {
-            padding: [30, 30],
-            maxZoom: 13,
-            animate: false,
-          });
-        };
-
-        fitPref();
-        const t1 = setTimeout(fitPref, 60);
-        const t2 = setTimeout(fitPref, 250);
-
-        return () => {
-          clearTimeout(t1);
-          clearTimeout(t2);
-        };
-      }
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+      };
     }
-  }, [track, prefecture]);
+  }, [track, prefecture, activityId]);
 
   // Handle synced cursor position marker from elevation profile
   useEffect(() => {

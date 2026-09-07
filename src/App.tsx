@@ -317,7 +317,7 @@ export default function App() {
           </div>
           <div className="shrink-0">
             <h1 className="text-base sm:text-lg font-bold tracking-tight text-slate-900 leading-snug whitespace-nowrap">
-              CyclingClimbing <span className="text-blue-600 font-medium">Log</span>
+              CyclingClimbing
             </h1>
             <div className="text-[11px] text-slate-400 flex items-center gap-1.5 whitespace-nowrap mt-0.5">
               <span className="hidden xs:inline">CyclingClimbingList.csv</span>
