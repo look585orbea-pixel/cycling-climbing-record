@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+/* Visible, refined horizontal scrollbar for single-row filter bar */
+.filter-scrollbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9;
+}
+
+.filter-scrollbar::-webkit-scrollbar {
+  height: 6px;
+}
+
+.filter-scrollbar::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+
+.filter-scrollbar::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 9999px;
+}
+
+.filter-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Visible, smooth vertical scrollbar */
+.custom-scrollbar-y {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9;
+}
+
+.custom-scrollbar-y::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar-y::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+
+.custom-scrollbar-y::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+.custom-scrollbar-y::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+

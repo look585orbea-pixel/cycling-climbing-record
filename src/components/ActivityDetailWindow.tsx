@@ -1,0 +1,698 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { ActivityRecord, GpxTrack } from '../types';
+import { LeafletMapView } from './LeafletMapView';
+import { ElevationProfile } from './ElevationProfile';
+import { parseGpxXml, convertGoogleDriveUrl, getGoogleDriveDownloadUrl } from '../utils/gpxParser';
+import { generateSampleGpxTrack } from '../data/sampleGpx';
+import { ServiceIcon } from './ServiceIcon';
+import { renderColorizedEmoji } from '../utils/emojiRenderer';
+import {
+  X,
+  ExternalLink,
+  MapPin,
+  Calendar,
+  Clock,
+  TrendingUp,
+  Maximize2,
+  Minimize2,
+  Upload,
+  FileText,
+  Compass,
+  Bike,
+  Mountain,
+  Share2,
+  Sparkles,
+  AlertCircle,
+  Download,
+  Check
+} from 'lucide-react';
+
+interface ActivityDetailWindowProps {
+  activity: ActivityRecord | null;
+  onClose: () => void;
+}
+
+// Client-side cache for parsed GPX tracks: ensures we fetch strictly ONE file per activity and never re-fetch
+const clientGpxCache = new Map<string, { track: GpxTrack; text: string }>();
+
+export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ activity, onClose }) => {
+  const [gpxTrack, setGpxTrack] = useState<GpxTrack | null>(null);
+  const [rawGpxText, setRawGpxText] = useState<string | null>(null);
+  const [isLoadingGpx, setIsLoadingGpx] = useState(false);
+  const [downloadingGpx, setDownloadingGpx] = useState(false);
+  const [gpxError, setGpxError] = useState<string | null>(null);
+  const [isMaximized, setIsMaximized] = useState(false);
+  const [activeTab, setActiveTab] = useState<'map' | 'info'>('map');
+
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleDownloadGpx = async () => {
+    if (!activity?.gpsLogUrl) return;
+    setDownloadingGpx(true);
+    const cleanDate = activity.dateStr ? activity.dateStr.replace(/[^0-9]/g, '') : '';
+    const filename = cleanDate ? `${cleanDate}.gpx` : 'activity.gpx';
+
+    const triggerBlob = (text: string) => {
+      const blob = new Blob([text], { type: 'application/gpx+xml;charset=utf-8' });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+        setDownloadingGpx(false);
+      }, 300);
+    };
+
+    if (rawGpxText) {
+      triggerBlob(rawGpxText);
+      return;
+    }
+
+    try {
+      const directUrl = getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl) || activity.gpsLogUrl;
+      const res = await fetch(directUrl);
+      if (res.ok) {
+        const text = await res.text();
+        if (text.includes('<gpx') || text.includes('<?xml')) {
+          triggerBlob(text);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+
+    try {
+      const proxyUrl = `/api/gpx-download?url=${encodeURIComponent(activity.gpsLogUrl)}&filename=${filename}`;
+      const pRes = await fetch(proxyUrl);
+      if (pRes.ok) {
+        const text = await pRes.text();
+        if (text.includes('<gpx') || text.includes('<?xml')) {
+          triggerBlob(text);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+
+    window.open(activity.gpsLogUrl, '_blank');
+    setDownloadingGpx(false);
+  };
+
+  const loadGpx = async () => {
+    if (!activity) return;
+
+    // Abort previous in-flight request if user rapidly changed activities
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    if (activity.gpsLogUrl) {
+      // 1. Check local client cache first: instant load with 0 network calls
+      const cacheKey = activity.gpsLogUrl.trim();
+      if (clientGpxCache.has(cacheKey)) {
+        const cached = clientGpxCache.get(cacheKey)!;
+        setGpxTrack(cached.track);
+        setRawGpxText(cached.text);
+        setGpxError(null);
+        setIsLoadingGpx(false);
+        return;
+      }
+
+      setIsLoadingGpx(true);
+      setGpxError(null);
+      setGpxTrack(null);
+      setRawGpxText(null);
+
+      try {
+        const directUrl = getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl) || activity.gpsLogUrl;
+        let text = '';
+
+        // 1. Server-side proxy FIRST (Handles Google Drive downloads and CORS in dev AND production)
+        try {
+          const proxyUrl = `/api/gpx-proxy?url=${encodeURIComponent(activity.gpsLogUrl)}`;
+          const res = await fetch(proxyUrl, { signal: controller.signal });
+          if (res.ok) {
+            const proxyText = await res.text();
+            if (proxyText.includes('<gpx') || proxyText.includes('<?xml')) {
+              text = proxyText;
+            }
+          }
+        } catch (proxyErr: any) {
+          if (proxyErr.name === 'AbortError') return;
+          console.warn('Backend GPX proxy fetch note:', proxyErr);
+        }
+
+        // 2. Direct fetch fallback if proxy did not return xml
+        if (!text && directUrl && !controller.signal.aborted) {
+          try {
+            const res = await fetch(directUrl, { signal: controller.signal });
+            if (res.ok) {
+              const directText = await res.text();
+              if (directText.includes('<gpx') || directText.includes('<?xml')) {
+                text = directText;
+              }
+            }
+          } catch (fetchErr: any) {
+            if (fetchErr.name === 'AbortError') return;
+            console.warn('Direct GPX fetch note:', fetchErr);
+          }
+        }
+
+        // 3. Fallback to public CORS proxies if still no text
+        if (!text && directUrl && !controller.signal.aborted) {
+          const corsProxies = [
+            `https://corsproxy.io/?url=${encodeURIComponent(directUrl)}`,
+            `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`,
+          ];
+          for (const cProxy of corsProxies) {
+            if (controller.signal.aborted) return;
+            try {
+              const res = await fetch(cProxy, { signal: controller.signal });
+              if (res.ok) {
+                const proxyText = await res.text();
+                if (proxyText.includes('<gpx') || proxyText.includes('<?xml')) {
+                  text = proxyText;
+                  break;
+                }
+              }
+            } catch (cpErr: any) {
+              if (cpErr.name === 'AbortError') return;
+            }
+          }
+        }
+
+        if (controller.signal.aborted) return;
+
+        if (text) {
+          const parsed = parseGpxXml(text);
+          setGpxTrack(parsed);
+          setRawGpxText(text);
+          setGpxError(null);
+          // Save to client cache
+          clientGpxCache.set(cacheKey, { track: parsed, text });
+        } else {
+          // If network fetch failed to get direct XML, display realistic matching route
+          const fallback = generateSampleGpxTrack(
+            activity.title,
+            activity.distVal || 35,
+            activity.elevVal || 800,
+            activity.prefStr,
+            activity.spots
+          );
+          setGpxTrack(fallback);
+          setGpxError('Google DriveからのGPX取得に失敗したため、推定ルートを表示しています。');
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        console.warn('GPX load note:', err.message);
+        const fallback = generateSampleGpxTrack(
+          activity.title,
+          activity.distVal || 35,
+          activity.elevVal || 800,
+          activity.prefStr,
+          activity.spots
+        );
+        setGpxTrack(fallback);
+        setGpxError('Google DriveからのGPX取得に失敗したため、推定ルートを表示しています。');
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoadingGpx(false);
+        }
+      }
+    } else {
+      // Activity has no GPS link, generate route based on stats
+      const fallback = generateSampleGpxTrack(
+        activity.title,
+        activity.distVal || 35,
+        activity.elevVal || 800,
+        activity.prefStr,
+        activity.spots
+      );
+      setGpxTrack(fallback);
+      setGpxError(null);
+      setIsLoadingGpx(false);
+    }
+  };
+
+  useEffect(() => {
+    loadGpx();
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, [activity?.id, activity?.gpsLogUrl]);
+
+  if (!activity) return null;
+
+  // Handle local GPX file upload
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = parseGpxXml(text);
+        setGpxTrack(parsed);
+        setRawGpxText(text);
+        setGpxError(null);
+      } catch (err: any) {
+        setGpxError('GPXファイルの解析に失敗しました: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // Open in real popup window if user clicks open in new window
+  const openInNewWindow = () => {
+    try {
+      const popup = window.open(
+        '',
+        '_blank',
+        'width=1000,height=800,menubar=no,toolbar=no,location=no,status=no'
+      );
+      if (popup) {
+        popup.document.write(`
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <title>${activity.title} - ${activity.dateStr}</title>
+              <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; line-height: 1.6; color: #1e293b; }
+                h1 { font-size: 1.4rem; margin-bottom: 8px; }
+                table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+                th, td { border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 0.9rem; }
+                th { background-color: #f1f5f9; width: 160px; }
+              </style>
+            </head>
+            <body>
+              <h1>${activity.title}</h1>
+              <p style="color: #64748b;">${activity.dateStr} | ${activity.cat} ${activity.act}</p>
+              <table>
+                <tr><th>日付</th><td>${activity.dateStr}</td></tr>
+                <tr><th>活動区分</th><td>${activity.cat}</td></tr>
+                <tr><th>ｱｸﾃｨﾋﾞﾃｨ</th><td>${activity.act}</td></tr>
+                <tr><th>タイトル</th><td>${activity.title}</td></tr>
+                <tr><th>記録リンク</th><td>${activity.link ? `<a href="${activity.link}" target="_blank">${activity.link}</a>` : 'なし'}</td></tr>
+                <tr><th>GPSログ</th><td>${activity.gpsLogUrl ? `<a href="${activity.gpsLogUrl}" target="_blank">${activity.gpsLogUrl}</a>` : 'なし'}</td></tr>
+                <tr><th>主な訪問地</th><td>${activity.spots || '－'}</td></tr>
+                <tr><th>都道府県</th><td>${activity.prefStr || '－'}</td></tr>
+                <tr><th>補足</th><td>${activity.note || '－'}</td></tr>
+                <tr><th>距離[km]</th><td>${activity.distStr ? `${activity.distStr} km` : '－'}</td></tr>
+                <tr><th>獲得標高[m]</th><td>${activity.elevStr ? `${activity.elevStr} m` : '－'}</td></tr>
+                <tr><th>走行・歩行時間</th><td>${activity.time || '－'}</td></tr>
+                <tr><th>車種/メーカー/モデル</th><td>${activity.gearStr || '－'}</td></tr>
+              </table>
+            </body>
+          </html>
+        `);
+        popup.document.close();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const isYamap = activity.link.includes('yamap');
+  const isGarmin = activity.link.toLowerCase().includes('garmin');
+
+  return (
+    <div
+      id="activity-detail-modal-overlay"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-200"
+    >
+      <div
+        id="activity-detail-window"
+        className={`bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-slate-200 transition-all duration-300 ${
+          isMaximized ? 'w-full h-full max-w-none rounded-none' : 'w-full max-w-5xl h-[92vh] max-h-[900px]'
+        }`}
+      >
+        {/* Sleek Window Header: 左上のアイコンとｱｸﾃｨﾋﾞﾃｨを消し、タイトルを日付の右隣に配置 */}
+        <div className="h-14 sm:h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between select-none shrink-0 shadow-2xs z-10">
+          <div className="flex items-center gap-3 min-w-0 flex-1 mr-3">
+            <span className="text-xs sm:text-sm font-mono font-bold px-2.5 py-1 rounded-xl bg-slate-100 text-slate-700 shrink-0">
+              {activity.dateStr}
+            </span>
+            <h2 className="text-sm sm:text-base md:text-lg font-bold text-slate-900 tracking-tight truncate flex-1 min-w-0" title={activity.title}>
+              {activity.title}
+            </h2>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0 ml-3">
+            <button
+              id="btn-open-popup-window"
+              onClick={openInNewWindow}
+              title="別ウィンドウで開く"
+              className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition"
+            >
+              <Share2 className="w-4 h-4" />
+            </button>
+            <button
+              id="btn-toggle-maximize"
+              onClick={() => setIsMaximized(!isMaximized)}
+              title={isMaximized ? '縮小' : '最大化'}
+              className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition hidden sm:inline-flex"
+            >
+              {isMaximized ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </button>
+            <button
+              id="btn-close-activity-window"
+              onClick={onClose}
+              title="閉じる"
+              className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition ml-1"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Content Body - 詳細表示画面全体を縦スクロール（全13項目は内部スクロールせず常にすべて完全表示） */}
+        <div id="activity-detail-scroll-body" className="flex-1 overflow-y-auto custom-scrollbar-y">
+          <div className="flex flex-col md:flex-row w-full">
+            {/* Map & Elevation Area: デスクトップではsticky表示で地図を見失わず、モバイルでは縦高さ520pxで表示 */}
+            <div className="w-full shrink-0 h-[520px] sm:h-[580px] md:h-[680px] lg:h-[750px] md:w-3/5 lg:w-2/3 md:self-start md:sticky md:top-0 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-100 relative">
+              <div className="flex-1 relative overflow-hidden min-h-[380px] md:min-h-0">
+              {isLoadingGpx ? (
+                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-50 text-slate-500 text-xs gap-2">
+                  <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                  <span className="font-semibold text-slate-700 text-sm">GPXログデータを読み込み中...</span>
+                  <span className="text-slate-400 text-xs">ルートと標高データを取得・解析しています</span>
+                </div>
+              ) : gpxTrack && gpxTrack.points.length > 0 ? (
+                <>
+                  <LeafletMapView track={gpxTrack} activityTitle={activity.title} />
+                  {gpxError && (
+                    <div className="absolute top-3 left-3 right-3 z-1000 bg-amber-500/95 text-white px-3.5 py-2 rounded-xl text-xs flex items-center justify-between shadow-lg backdrop-blur-xs">
+                      <div className="flex items-center gap-2 pr-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 text-amber-100" />
+                        <span className="font-medium">{gpxError}</span>
+                      </div>
+                      <button
+                        onClick={loadGpx}
+                        className="px-2.5 py-1 bg-white/20 hover:bg-white/30 text-white rounded-lg text-[11px] font-bold shrink-0 transition"
+                      >
+                        再試行
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-50 p-6 text-center">
+                  <div className="w-12 h-12 rounded-full bg-slate-200/70 flex items-center justify-center text-slate-400 mb-3">
+                    <MapPin className="w-6 h-6 text-slate-400" />
+                  </div>
+                  <div className="text-sm font-bold text-slate-800 mb-1">
+                    {gpxError || (activity.gpsLogUrl ? 'GPXログの読み込みに失敗しました' : 'GPSログ（GPXデータ）がありません')}
+                  </div>
+                  <p className="text-xs text-slate-500 max-w-sm mb-4 leading-relaxed">
+                    {activity.gpsLogUrl
+                      ? 'GPSログの直接取得ができなかった場合は、再試行するか、お持ちの.gpxファイルを直接読み込んでください。'
+                      : 'お手元に.gpxファイルがある場合は、下のボタンから読み込んでルートを表示できます。'}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {activity.gpsLogUrl && (
+                      <button
+                        type="button"
+                        onClick={loadGpx}
+                        className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs transition cursor-pointer"
+                      >
+                        再試行
+                      </button>
+                    )}
+                    <label
+                      htmlFor="gpx-file-input-fallback"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold border border-slate-300 shadow-2xs cursor-pointer transition"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-slate-500" />
+                      <span>.gpxファイルを読込</span>
+                      <input
+                        id="gpx-file-input-fallback"
+                        type="file"
+                        accept=".gpx,application/gpx+xml,text/xml"
+                        onChange={handleFileUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* Upload GPX overlay button when track is shown */}
+              {gpxTrack && (
+                <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2">
+                  <label
+                    htmlFor="gpx-file-input"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold rounded-xl shadow-sm border border-slate-200/80 cursor-pointer backdrop-blur-xs transition"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-slate-500" />
+                    <span>.gpxファイルを読込</span>
+                    <input
+                      id="gpx-file-input"
+                      type="file"
+                      accept=".gpx,application/gpx+xml,text/xml"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
+            {/* Bottom Elevation Profile Graph */}
+            {gpxTrack && gpxTrack.points.some(p => p.ele !== undefined) && (
+              <div className="shrink-0 p-3 bg-slate-950 border-t border-slate-800">
+                <ElevationProfile
+                  points={gpxTrack.points}
+                  totalDistanceKm={gpxTrack.totalDistanceKm}
+                  elevationGainM={gpxTrack.elevationGainM}
+                  maxElevationM={gpxTrack.maxElevationM}
+                  minElevationM={gpxTrack.minElevationM}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Activity Data Details Panel: 内部スクロールせず、全13項目を常にそのまま完全表示 */}
+          <div className="w-full md:w-2/5 lg:w-1/3 bg-[#F8FAFC] p-4 sm:p-5 flex flex-col gap-4 shrink-0">
+            {/* Quick Stat Cards */}
+            <div className="grid grid-cols-3 gap-2.5">
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-3 shadow-2xs text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-0.5">距離</div>
+                <div className="text-base sm:text-lg font-black text-blue-600 font-mono">
+                  {activity.distStr || '0'}
+                  <span className="text-xs text-slate-500 font-normal ml-0.5">km</span>
+                </div>
+              </div>
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-3 shadow-2xs text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-0.5">獲得標高</div>
+                <div className="text-base sm:text-lg font-black text-emerald-600 font-mono">
+                  {activity.elevStr || '0'}
+                  <span className="text-xs text-slate-500 font-normal ml-0.5">m</span>
+                </div>
+              </div>
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-3 shadow-2xs text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-0.5">所要時間</div>
+                <div className="text-xs sm:text-sm font-bold text-slate-900 font-mono mt-0.5">
+                  {activity.time || '－'}
+                </div>
+              </div>
+            </div>
+
+            {/* Notification / notice if sample GPX shown */}
+            {gpxError && (
+              <div className="bg-amber-50 border border-amber-200/80 rounded-2xl p-3 text-xs text-amber-800 flex items-start gap-2 shadow-2xs">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <span className="leading-tight">{gpxError}</span>
+              </div>
+            )}
+
+            {/* Complete Activity Table (All 13 required fields) */}
+            <div className="bg-white border border-slate-200/80 rounded-2xl shadow-2xs overflow-hidden">
+              <div className="bg-slate-50/80 px-4 py-2.5 border-b border-slate-100 text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                <span>記録の詳細情報</span>
+                <span className="text-[10px] font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">13項目</span>
+              </div>
+
+              <div className="divide-y divide-slate-100 text-xs">
+                {/* 1. 日付 */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">日付</div>
+                  <div className="font-semibold text-slate-900 font-mono">{activity.dateStr}</div>
+                </div>
+
+                {/* 2. 活動区分 */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">活動区分</div>
+                  <div className="font-bold text-slate-900 text-sm">
+                    {renderColorizedEmoji(activity.cat) || '－'}
+                  </div>
+                </div>
+
+                {/* 3. ｱｸﾃｨﾋﾞﾃｨ */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">ｱｸﾃｨﾋﾞﾃｨ</div>
+                  <div>
+                    <span className="px-2.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-full font-semibold text-[11px]">
+                      {activity.act}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 4. タイトル */}
+                <div className="flex py-2.5 px-4 items-start">
+                  <div className="w-28 text-slate-400 font-medium shrink-0 pt-0.5">タイトル</div>
+                  <div className="font-bold text-slate-900 leading-snug">{activity.title}</div>
+                </div>
+
+                {/* 5. 記録リンク */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">記録リンク</div>
+                  <div>
+                    {activity.link ? (
+                      <a
+                        href={activity.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 px-3 py-1.5 bg-slate-100 hover:bg-blue-50 text-slate-800 hover:text-blue-700 rounded-xl border border-slate-200 text-xs font-semibold transition"
+                      >
+                        <ServiceIcon url={activity.link} size={18} />
+                        {isYamap && <span className="font-bold text-red-600">YAMAPで見る</span>}
+                        {isGarmin && <span className="font-bold text-sky-600">Garmin Connectで見る</span>}
+                        {!isYamap && !isGarmin && <span>記録リンクを開く</span>}
+                        <ExternalLink className="w-3 h-3 text-slate-400" />
+                      </a>
+                    ) : (
+                      <span className="text-slate-400">－</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 6. GPSログ */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">GPSログ</div>
+                  <div className="min-w-0 flex-1 flex items-center justify-between gap-2 flex-wrap">
+                    <div>
+                      {activity.gpsLogUrl ? (
+                        <button
+                          type="button"
+                          onClick={handleDownloadGpx}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold border border-blue-200/80 transition cursor-pointer shadow-2xs"
+                          title={`${activity.dateStr ? activity.dateStr.replace(/[^0-9]/g, '') + '.gpx' : 'activity.gpx'} をダウンロード`}
+                        >
+                          {downloadingGpx ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5 text-blue-600" />
+                          )}
+                          <span>.gpxダウンロード</span>
+                        </button>
+                      ) : (
+                        <span className="text-slate-400">－</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 7. 主な訪問地 */}
+                <div className="flex py-2.5 px-4 items-start">
+                  <div className="w-28 text-slate-400 font-medium shrink-0 pt-0.5">主な訪問地</div>
+                  <div className="text-slate-800 leading-relaxed break-words flex-1">
+                    {activity.spots || '－'}
+                  </div>
+                </div>
+
+                {/* 8. 都道府県 */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">都道府県</div>
+                  <div className="flex flex-wrap gap-1">
+                    {activity.prefList.length > 0 ? (
+                      activity.prefList.map(p => (
+                        <span key={p} className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-full text-[11px] font-medium">
+                          {p}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-slate-400">－</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 9. 補足 */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">補足</div>
+                  <div className="text-slate-800 font-medium">{renderColorizedEmoji(activity.note) || '－'}</div>
+                </div>
+
+                {/* 10. 距離[km] */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">距離［km］</div>
+                  <div className="font-mono text-slate-900 font-semibold">
+                    {activity.distStr ? `${activity.distStr} km` : '－'}
+                  </div>
+                </div>
+
+                {/* 11. 獲得標高[m] */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">獲得標高［m］</div>
+                  <div className="font-mono text-slate-900 font-semibold">
+                    {activity.elevStr ? `${activity.elevStr} m` : '－'}
+                  </div>
+                </div>
+
+                {/* 12. 走行・歩行時間 */}
+                <div className="flex py-2.5 px-4 items-center">
+                  <div className="w-28 text-slate-400 font-medium shrink-0">走行・歩行時間</div>
+                  <div className="font-mono text-slate-900 font-semibold">{activity.time || '－'}</div>
+                </div>
+
+                {/* 13. 車種/メーカー/モデル */}
+                <div className="flex py-2.5 px-4 items-start">
+                  <div className="w-28 text-slate-400 font-medium shrink-0 pt-0.5">機材</div>
+                  <div className="text-slate-800">
+                    {activity.gearStr ? (
+                      <div className="space-y-0.5">
+                        <div className="font-semibold text-slate-900">{activity.type}</div>
+                        <div className="text-xs text-slate-500">{activity.maker} {activity.model}</div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400">－</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* GPX Track Summary Box */}
+            {gpxTrack && (
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-4 text-xs shadow-2xs">
+                <div className="font-bold text-slate-900 mb-2 flex items-center justify-between">
+                  <span>GPSログ追跡データ情報</span>
+                  <span className="text-[10px] font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                    {gpxTrack.points.length} ポイント
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-slate-600 text-[11px]">
+                  <div>GPS総距離: <strong className="text-slate-900">{gpxTrack.totalDistanceKm} km</strong></div>
+                  <div>GPS累積上昇: <strong className="text-slate-900">{gpxTrack.elevationGainM} m</strong></div>
+                  <div>最低標高: <strong className="text-slate-900">{gpxTrack.minElevationM} m</strong></div>
+                  <div>最高地点: <strong className="text-blue-600">{gpxTrack.maxElevationM} m</strong></div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  );
+};

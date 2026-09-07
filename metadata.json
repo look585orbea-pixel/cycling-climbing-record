@@ -1,0 +1,8 @@
+{
+  "name": "サイクリング登山記録一覧",
+  "description": "サイクリング・登山記録（CyclingClimbingList.csv）の一覧表示、詳細情報表示、およびGPXログデータのGoogleマップ表示アプリケーション",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
