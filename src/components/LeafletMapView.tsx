@@ -71,6 +71,7 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
       center: [35.681236, 139.767125],
       zoom: 11,
       zoomControl: false,
+      preferCanvas: true, // Hardware-accelerated Canvas rendering for smooth tablet performance
     });
 
     L.control.zoom({ position: 'topleft' }).addTo(map);
@@ -119,7 +120,13 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
 
     if (!track || !track.points || track.points.length === 0) return;
 
-    const latlngs: L.LatLngTuple[] = track.points.map((p) => [p.lat, p.lng]);
+    // If GPX has extreme number of points (e.g. >3000), sample evenly while preserving start and end for smooth rendering on mobile/tablet
+    let sampledPoints = track.points;
+    if (track.points.length > 3000) {
+      const step = Math.ceil(track.points.length / 2500);
+      sampledPoints = track.points.filter((_, idx) => idx === 0 || idx === track.points.length - 1 || idx % step === 0);
+    }
+    const latlngs: L.LatLngTuple[] = sampledPoints.map((p) => [p.lat, p.lng]);
 
     // Track casing
     const casing = L.polyline(latlngs, {
@@ -128,6 +135,7 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
       opacity: 0.85,
       lineCap: 'round',
       lineJoin: 'round',
+      smoothFactor: 1.8,
     });
     layerGroup.addLayer(casing);
 
@@ -138,6 +146,7 @@ export const LeafletMapView: React.FC<LeafletMapViewProps> = ({
       opacity: 0.95,
       lineCap: 'round',
       lineJoin: 'round',
+      smoothFactor: 1.8,
     });
     layerGroup.addLayer(line);
 

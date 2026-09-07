@@ -3,6 +3,7 @@ import { ActivityRecord, GpxTrack, GpxPoint } from '../types';
 import { LeafletMapView } from './LeafletMapView';
 import { ElevationProfile } from './ElevationProfile';
 import { parseGpxXml, convertGoogleDriveUrl, getGoogleDriveDownloadUrl, getCandidateGpxUrls } from '../utils/gpxParser';
+import { getGpxFromIndexedDb, saveGpxToIndexedDb } from '../utils/gpxStorage';
 import { getFirstPrefectureName } from '../utils/prefectureBounds';
 import { ServiceIcon } from './ServiceIcon';
 import { renderColorizedEmoji } from '../utils/emojiRenderer';
@@ -24,7 +25,8 @@ import {
   Sparkles,
   AlertCircle,
   Download,
-  Check
+  Check,
+  HelpCircle
 } from 'lucide-react';
 
 interface ActivityDetailWindowProps {
@@ -44,6 +46,8 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
   const [gpxError, setGpxError] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
   const [activeTab, setActiveTab] = useState<'map' | 'info'>('map');
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [showGpxHelp, setShowGpxHelp] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const firstPrefecture = activity ? getFirstPrefectureName(activity) : null;
@@ -126,6 +130,9 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
     if (activity.gpsLogUrl) {
       // 1. Check local client cache first: instant load with 0 network calls
       const cacheKey = activity.gpsLogUrl.trim();
+      const cleanDate = activity.dateStr ? activity.dateStr.replace(/[^0-9]/g, '') : '';
+      const filename = cleanDate ? `${cleanDate}.gpx` : 'activity.gpx';
+
       if (clientGpxCache.has(cacheKey)) {
         const cached = clientGpxCache.get(cacheKey)!;
         setGpxTrack(cached.track);
@@ -139,6 +146,22 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
       setGpxError(null);
       setGpxTrack(null);
       setRawGpxText(null);
+
+      // Check IndexedDB persistence (allows GPX files to load instantly even offline or on GitHub Pages)
+      try {
+        const idbText = (await getGpxFromIndexedDb(cacheKey)) || (cleanDate ? await getGpxFromIndexedDb(cleanDate) : null);
+        if (idbText && (idbText.includes('<gpx') || idbText.includes('<?xml'))) {
+          const parsed = parseGpxXml(idbText);
+          setGpxTrack(parsed);
+          setRawGpxText(idbText);
+          setGpxError(null);
+          setIsLoadingGpx(false);
+          clientGpxCache.set(cacheKey, { track: parsed, text: idbText });
+          return;
+        }
+      } catch (idbErr) {
+        console.warn('IndexedDB check note:', idbErr);
+      }
 
       try {
         let text = '';
@@ -220,17 +243,19 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
           setGpxTrack(parsed);
           setRawGpxText(text);
           setGpxError(null);
-          // Save to client cache
+          // Save to client memory cache & IndexedDB persistent storage
           clientGpxCache.set(cacheKey, { track: parsed, text });
+          saveGpxToIndexedDb(cacheKey, filename, text);
+          if (cleanDate) saveGpxToIndexedDb(cleanDate, filename, text);
         } else {
           setGpxTrack(null);
-          setGpxError('GPXデータの取得に失敗しました。');
+          setGpxError('GPXデータの自動取得に失敗しました。');
         }
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         console.warn('GPX load note:', err.message);
         setGpxTrack(null);
-        setGpxError('GPXデータの取得に失敗しました。');
+        setGpxError('GPXデータの自動取得に失敗しました。');
       } finally {
         if (!controller.signal.aborted) {
           setIsLoadingGpx(false);
@@ -257,6 +282,23 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
 
   if (!activity) return null;
 
+  const applyGpxContent = (text: string) => {
+    try {
+      const parsed = parseGpxXml(text);
+      setGpxTrack(parsed);
+      setRawGpxText(text);
+      setGpxError(null);
+      const cacheKey = activity.gpsLogUrl ? activity.gpsLogUrl.trim() : (activity.dateStr || 'default');
+      const cleanDate = activity.dateStr ? activity.dateStr.replace(/[^0-9]/g, '') : '';
+      const filename = cleanDate ? `${cleanDate}.gpx` : 'activity.gpx';
+      clientGpxCache.set(cacheKey, { track: parsed, text });
+      saveGpxToIndexedDb(cacheKey, filename, text);
+      if (cleanDate) saveGpxToIndexedDb(cleanDate, filename, text);
+    } catch (err: any) {
+      setGpxError('GPXファイルの解析に失敗しました: ' + err.message);
+    }
+  };
+
   // Handle local GPX file upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -264,17 +306,34 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      try {
-        const text = event.target?.result as string;
-        const parsed = parseGpxXml(text);
-        setGpxTrack(parsed);
-        setRawGpxText(text);
-        setGpxError(null);
-      } catch (err: any) {
-        setGpxError('GPXファイルの解析に失敗しました: ' + err.message);
-      }
+      const text = event.target?.result as string;
+      if (text) applyGpxContent(text);
     };
     reader.readAsText(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const text = event.target?.result as string;
+        if (text) applyGpxContent(text);
+      };
+      reader.readAsText(file);
+    }
   };
 
   // Open in real popup window if user clicks open in new window
@@ -384,7 +443,21 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
         <div id="activity-detail-scroll-body" className="flex-1 overflow-y-auto custom-scrollbar-y">
           <div className="flex flex-col md:flex-row w-full">
             {/* Map & Elevation Area: デスクトップではsticky表示で地図を見失わず、モバイルでは縦高さ520pxで表示 */}
-            <div className="w-full shrink-0 h-[520px] sm:h-[580px] md:h-[680px] lg:h-[750px] md:w-3/5 lg:w-2/3 md:self-start md:sticky md:top-0 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-100 relative">
+            <div
+              className="w-full shrink-0 h-[520px] sm:h-[580px] md:h-[680px] lg:h-[750px] md:w-3/5 lg:w-2/3 md:self-start md:sticky md:top-0 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-100 relative"
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
+              {/* Drag-over dropzone overlay */}
+              {isDragOver && (
+                <div className="absolute inset-0 z-50 bg-blue-600/85 backdrop-blur-xs flex flex-col items-center justify-center text-white p-4 border-2 border-dashed border-white pointer-events-none">
+                  <Upload className="w-12 h-12 mb-2 animate-bounce" />
+                  <p className="font-bold text-base">GPXファイルをここにドロップ</p>
+                  <p className="text-xs text-blue-100 mt-1">地図と標高グラフが即座に表示され、端末に自動保存されます</p>
+                </div>
+              )}
+
               <div className="flex-1 relative overflow-hidden min-h-[380px] md:min-h-0">
               {isLoadingGpx ? (
                 <div className="w-full h-full flex flex-col items-center justify-center bg-slate-50 text-slate-500 text-xs gap-2">
@@ -402,21 +475,82 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
                   />
 
                   {gpxError && activity.gpsLogUrl && (
-                    <div className="absolute top-3 left-3 right-3 z-1000 bg-amber-500/95 text-white px-3.5 py-2 rounded-xl text-xs flex items-center justify-between shadow-lg backdrop-blur-xs">
-                      <div className="flex items-center gap-2 pr-2">
-                        <AlertCircle className="w-4 h-4 shrink-0 text-amber-100" />
-                        <span className="font-medium">{gpxError}</span>
+                    <div className="absolute top-3 left-3 right-3 z-1000 bg-white/95 border border-amber-300 rounded-2xl shadow-xl backdrop-blur-xs overflow-hidden text-xs text-slate-800 animate-in fade-in duration-200">
+                      <div className="bg-amber-50/90 px-3.5 py-2.5 flex items-center justify-between border-b border-amber-200">
+                        <div className="flex items-center gap-2 min-w-0 pr-2">
+                          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                          <span className="font-bold text-slate-800 truncate">GPXログの自動取得について</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setShowGpxHelp(v => !v)}
+                            className="px-2 py-0.5 text-[11px] font-semibold text-amber-800 bg-amber-200/70 hover:bg-amber-200 rounded-md transition cursor-pointer"
+                          >
+                            {showGpxHelp ? '閉じる' : '詳細・解決策'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={loadGpx}
+                            className="px-2.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-[11px] font-bold shrink-0 transition cursor-pointer"
+                          >
+                            再試行
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        onClick={loadGpx}
-                        className="px-2.5 py-1 bg-white/20 hover:bg-white/30 text-white rounded-lg text-[11px] font-bold shrink-0 transition"
-                      >
-                        再試行
-                      </button>
+
+                      <div className="p-3 bg-white space-y-2">
+                        <p className="text-[11px] text-slate-600 leading-relaxed">
+                          GitHub Pages等の静的サイト環境では、ブラウザのセキュリティ制限（CORS）によりGoogle Driveからの直接自動ダウンロードがブロックされる場合があります。
+                        </p>
+                        
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                          {/* Direct download button */}
+                          <a
+                            href={getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl) || activity.gpsLogUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs transition shadow-2xs"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>1. Google Driveから直接DL</span>
+                          </a>
+
+                          {/* File picker */}
+                          <label
+                            htmlFor="gpx-file-fallback-input"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs cursor-pointer transition border border-slate-200"
+                          >
+                            <Upload className="w-3.5 h-3.5 text-slate-500" />
+                            <span>2. ダウンロードしたGPXを選択</span>
+                            <input
+                              id="gpx-file-fallback-input"
+                              type="file"
+                              accept=".gpx,application/gpx+xml,text/xml"
+                              onChange={handleFileUpload}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+
+                        {showGpxHelp && (
+                          <div className="mt-2.5 pt-2.5 border-t border-slate-100 text-[11px] text-slate-500 space-y-1.5 bg-slate-50 -mx-3 -mb-3 p-3 rounded-b-2xl">
+                            <p className="font-bold text-slate-700">💡 GitHub Pagesで全端末自動表示させる推奨方法：</p>
+                            <p className="leading-relaxed">
+                              リポジトリ内の <code className="font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-blue-600 font-semibold">public/gpx/</code>（または <code className="font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-blue-600 font-semibold">gpx/</code>）フォルダに、
+                              日付ファイル名 <code className="font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-blue-600 font-semibold">{activity.dateStr ? activity.dateStr.replace(/[^0-9]/g, '') : 'YYYYMMDD'}.gpx</code> としてファイルを配置してGitHubにpushすると、
+                              外部制限を受けずにGitHub Pagesから高速・完全に自動読み込みされます。
+                            </p>
+                            <p className="text-[10px] text-slate-400">
+                              ※手動で読み込んだGPXファイルはこのブラウザ（IndexedDB）に永続保存され、次回以降自動的に即時表示されます。
+                            </p>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
 
-                  {/* Upload GPX overlay button */}
+                  {/* Upload GPX overlay button (always accessible) */}
                   <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2">
                     <label
                       htmlFor="gpx-file-input"

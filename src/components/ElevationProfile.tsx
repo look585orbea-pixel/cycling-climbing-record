@@ -29,6 +29,8 @@ export const ElevationProfile: React.FC<ElevationProfileProps> = ({
   onPointSelect,
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+  const lastClientXRef = useRef<number>(0);
   const [isDragging, setIsDragging] = useState(false);
   const [internalPoint, setInternalPoint] = useState<GpxPoint | null>(null);
 
@@ -76,8 +78,14 @@ export const ElevationProfile: React.FC<ElevationProfileProps> = ({
       };
     });
 
-    // Build SVG path
-    const pathD = pointsWithCoords
+    // Build SVG path (if more than 800 points, downsample path for buttery-smooth tablet rendering while keeping peaks)
+    let pathPoints = pointsWithCoords;
+    if (pointsWithCoords.length > 800) {
+      const step = Math.ceil(pointsWithCoords.length / 600);
+      pathPoints = pointsWithCoords.filter((_, idx) => idx === 0 || idx === pointsWithCoords.length - 1 || idx % step === 0);
+    }
+
+    const pathD = pathPoints
       .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`)
       .join(' ');
 
@@ -163,10 +171,20 @@ export const ElevationProfile: React.FC<ElevationProfileProps> = ({
 
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!isDragging) return;
-    pickPointAtClientX(e.clientX);
+    lastClientXRef.current = e.clientX;
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        pickPointAtClientX(lastClientXRef.current);
+      });
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
     if (isDragging) {
       setIsDragging(false);
       try {

@@ -157,8 +157,29 @@ export function getGoogleDriveDownloadUrl(url: string): string | null {
 }
 
 /**
+ * Helper to get the absolute base URL of the currently hosted app,
+ * resolving repository subpaths on GitHub Pages (e.g. https://user.github.io/repo/).
+ */
+export function getAppBaseUrl(): string {
+  if (typeof window === 'undefined') return './';
+  const pathname = window.location.pathname;
+  // If the path doesn't end with a slash and has no extension, treat as directory
+  let dirPath = pathname;
+  if (!dirPath.endsWith('/')) {
+    const lastSlash = dirPath.lastIndexOf('/');
+    if (lastSlash >= 0) {
+      dirPath = dirPath.substring(0, lastSlash + 1);
+    } else {
+      dirPath = '/';
+    }
+  }
+  return `${window.location.origin}${dirPath}`;
+}
+
+/**
  * Resolves all candidate URLs / paths for a given GPX log entry,
- * prioritizing relative paths (./) for GitHub Pages compatibility.
+ * prioritizing relative paths (./), subpath-aware repository paths,
+ * and CDN/raw fallbacks for GitHub Pages compatibility.
  */
 export function getCandidateGpxUrls(gpsLogUrl?: string | null, dateStr?: string | null): string[] {
   const candidates: string[] = [];
@@ -177,6 +198,14 @@ export function getCandidateGpxUrls(gpsLogUrl?: string | null, dateStr?: string 
     if (!stripped.startsWith('gpx/')) {
       candidates.push(`./gpx/${stripped}`);
     }
+
+    if (typeof window !== 'undefined') {
+      const base = getAppBaseUrl();
+      candidates.push(`${base}${stripped}`);
+      if (!stripped.startsWith('gpx/')) {
+        candidates.push(`${base}gpx/${stripped}`);
+      }
+    }
   }
 
   // 2. Local static GPX files in repository (vital for GitHub Pages static hosting):
@@ -184,13 +213,38 @@ export function getCandidateGpxUrls(gpsLogUrl?: string | null, dateStr?: string 
   if (cleanDate) {
     candidates.push(`./gpx/${cleanDate}.gpx`);
     candidates.push(`./${cleanDate}.gpx`);
+
+    if (typeof window !== 'undefined') {
+      const base = getAppBaseUrl();
+      candidates.push(`${base}gpx/${cleanDate}.gpx`);
+      candidates.push(`${base}${cleanDate}.gpx`);
+      candidates.push(`${base}public/gpx/${cleanDate}.gpx`);
+
+      // If running on GitHub Pages (username.github.io/repo)
+      const hostname = window.location.hostname;
+      if (hostname.endsWith('github.io')) {
+        const username = hostname.replace('.github.io', '');
+        const pathSegments = window.location.pathname.split('/').filter(Boolean);
+        const repo = pathSegments[0];
+        if (username && repo) {
+          // GitHub Raw & jsDelivr (Both have Access-Control-Allow-Origin: * without CORP blocks)
+          candidates.push(`https://raw.githubusercontent.com/${username}/${repo}/main/public/gpx/${cleanDate}.gpx`);
+          candidates.push(`https://raw.githubusercontent.com/${username}/${repo}/main/gpx/${cleanDate}.gpx`);
+          candidates.push(`https://raw.githubusercontent.com/${username}/${repo}/master/public/gpx/${cleanDate}.gpx`);
+          candidates.push(`https://raw.githubusercontent.com/${username}/${repo}/master/gpx/${cleanDate}.gpx`);
+          candidates.push(`https://cdn.jsdelivr.net/gh/${username}/${repo}@main/public/gpx/${cleanDate}.gpx`);
+          candidates.push(`https://cdn.jsdelivr.net/gh/${username}/${repo}@main/gpx/${cleanDate}.gpx`);
+        }
+      }
+    }
   }
+
   if (dateTrimmed && dateTrimmed !== cleanDate) {
     candidates.push(`./gpx/${dateTrimmed}.gpx`);
     candidates.push(`./${dateTrimmed}.gpx`);
   }
 
-  // 3. Google Drive download URLs (with CORS enabled)
+  // 3. Google Drive download URLs (with direct download parameters)
   if (gpsLogUrl && (gpsLogUrl.includes('drive.google.com') || gpsLogUrl.includes('docs.google.com') || gpsLogUrl.includes('drive.usercontent.google.com'))) {
     const match = gpsLogUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || gpsLogUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
     if (match && match[1]) {

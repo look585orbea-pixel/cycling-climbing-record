@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ActivityRecord } from './types';
 import { parseCsv } from './utils/csvParser';
 import { getGoogleDriveDownloadUrl, convertGoogleDriveUrl, getCandidateGpxUrls } from './utils/gpxParser';
+import { getGpxFromIndexedDb } from './utils/gpxStorage';
 import { ActivityDetailWindow } from './components/ActivityDetailWindow';
 import { PrefectureModal } from './components/PrefectureModal';
 import { ServiceIcon } from './components/ServiceIcon';
@@ -18,7 +19,11 @@ import {
   Layers,
   ChevronDown,
   Compass,
-  FileSpreadsheet
+  FileSpreadsheet,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight
 } from 'lucide-react';
 
 export default function App() {
@@ -44,6 +49,10 @@ export default function App() {
 
   // Modal for Prefecture Selection
   const [isPrefModalOpen, setIsPrefModalOpen] = useState(false);
+
+  // Pagination for high-performance rendering on tablets (iPad, Android tablets)
+  const [pageSize, setPageSize] = useState<number>(50);
+  const [currentPage, setCurrentPage] = useState<number>(1);
 
   // Automatically load CyclingClimbingList.csv on launch
   useEffect(() => {
@@ -161,6 +170,11 @@ export default function App() {
       });
   }, [records, fYear, fCat, fAct, fNote, fGear, fDist, fElev, selectedPrefs, searchKeyword, fSort]);
 
+  // Reset to page 1 whenever any filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [fYear, fCat, fAct, fNote, fGear, fDist, fElev, selectedPrefs, searchKeyword, fSort]);
+
   // Aggregate stats
   const { totalDistance, totalElevation } = useMemo(() => {
     let dist = 0;
@@ -174,6 +188,16 @@ export default function App() {
       totalElevation: elev,
     };
   }, [filteredRecords]);
+
+  // Paged records calculation for tablet performance
+  const totalPages = pageSize === -1 ? 1 : Math.max(1, Math.ceil(filteredRecords.length / pageSize));
+  const validCurrentPage = Math.min(currentPage, totalPages);
+
+  const displayedRecords = useMemo(() => {
+    if (pageSize === -1) return filteredRecords;
+    const start = (validCurrentPage - 1) * pageSize;
+    return filteredRecords.slice(start, start + pageSize);
+  }, [filteredRecords, validCurrentPage, pageSize]);
 
   const handleTogglePref = (p: string) => {
     setSelectedPrefs(prev => {
@@ -218,6 +242,17 @@ export default function App() {
         URL.revokeObjectURL(blobUrl);
       }, 300);
     };
+
+    // 0. Check IndexedDB cache first
+    try {
+      const idbText = (await getGpxFromIndexedDb(r.gpsLogUrl)) || (cleanDate ? await getGpxFromIndexedDb(cleanDate) : null);
+      if (idbText && (idbText.includes('<gpx') || idbText.includes('<?xml'))) {
+        const blob = new Blob([idbText], { type: 'application/gpx+xml;charset=utf-8' });
+        triggerBlobDownload(blob, filename);
+        setTimeout(() => setDownloadingId(null), 800);
+        return;
+      }
+    } catch {}
 
     // 1. Try candidate URLs (local relative static paths ./gpx/${filename}, ./${filename}, direct Google Drive URLs)
     const candidateUrls = getCandidateGpxUrls(r.gpsLogUrl, r.dateStr);
@@ -498,74 +533,75 @@ export default function App() {
       </div>
 
       {/* Main Table Area */}
-      <main className="flex-1 overflow-auto p-2 sm:p-4 bg-[#F1F5F9]">
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-x-auto overflow-y-auto max-h-full">
-          <table className="min-w-[1380px] w-full border-collapse text-left text-xs">
-            <thead className="bg-slate-50/95 backdrop-blur-xs text-slate-500 font-bold tracking-wider text-[11px] sticky top-0 z-20 shadow-2xs border-b border-slate-200">
-              <tr>
-                <th className="py-3 px-1 font-semibold text-center w-[48px] min-w-[48px] max-w-[48px] sticky left-0 bg-slate-50/95 z-30">
-                  詳細
-                </th>
-                <th
-                  className="py-3 px-0.5 font-semibold text-center w-[38px] min-w-[38px] max-w-[38px] sticky left-[48px] bg-slate-50/95 z-30"
-                  title="GPXダウンロード"
-                >
-                  DL
-                </th>
-                <th
-                  className="py-1.5 px-0.5 font-semibold text-center w-[48px] min-w-[48px] max-w-[48px] sticky left-[86px] bg-slate-50/95 z-30 shadow-[1px_0_0_0_#e2e8f0] leading-tight text-[10px]"
-                  title="記録リンク"
-                >
-                  記録<br />リンク
-                </th>
-                <th className="py-3 px-3.5 font-semibold whitespace-nowrap">日付</th>
-                <th className="py-3 px-3 font-semibold text-center">活動区分</th>
-                <th className="py-3 px-3.5 font-semibold">ｱｸﾃｨﾋﾞﾃｨ</th>
-                <th className="py-3 px-3.5 font-semibold w-[200px] min-w-[200px] max-w-[200px]">
-                  タイトル
-                </th>
-                <th className="py-3 px-3.5 font-semibold w-[200px] min-w-[200px] max-w-[200px]">
-                  主な訪問地
-                </th>
-                <th className="py-3 px-3.5 font-semibold w-[100px] min-w-[100px] max-w-[100px]">都道府県</th>
-                <th className="py-3 px-3 font-semibold w-[100px] min-w-[100px] max-w-[100px]">
-                  補足
-                </th>
-                <th className="py-3 px-3.5 font-semibold text-right">距離［km］</th>
-                <th className="py-3 px-3.5 font-semibold text-right min-w-[110px]">
-                  獲得標高［m］
-                </th>
-                <th className="py-3 px-3.5 font-semibold text-right">走行・歩行時間</th>
-                <th className="py-3 px-3.5 font-semibold">車種</th>
-                <th className="py-3 px-3.5 font-semibold">メーカー</th>
-                <th className="py-3 px-3.5 font-semibold">モデル</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredRecords.length === 0 ? (
+      <main className="flex-1 overflow-auto p-2 sm:p-4 bg-[#F1F5F9] flex flex-col min-h-0">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 overflow-hidden min-h-0">
+          <div className="overflow-x-auto overflow-y-auto flex-1 custom-scrollbar">
+            <table className="min-w-[1380px] w-full border-collapse text-left text-xs">
+              <thead className="bg-slate-100 text-slate-600 font-bold tracking-wider text-[11px] sticky top-0 z-20 shadow-2xs border-b border-slate-200">
                 <tr>
-                  <td colSpan={16} className="py-14 text-center text-slate-400">
-                    {isLoadingCsv ? (
-                      <div className="flex flex-col items-center gap-2">
-                        <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                        <span className="text-xs font-medium text-slate-600">データを読み込み中...</span>
-                      </div>
-                    ) : (
-                      <span className="text-xs font-medium">該当する記録が見つかりませんでした。条件を変更してください。</span>
-                    )}
-                  </td>
+                  <th className="py-3 px-1 font-semibold text-center w-[48px] min-w-[48px] max-w-[48px] sticky left-0 bg-slate-100 z-30">
+                    詳細
+                  </th>
+                  <th
+                    className="py-3 px-0.5 font-semibold text-center w-[38px] min-w-[38px] max-w-[38px] sticky left-[48px] bg-slate-100 z-30"
+                    title="GPXダウンロード"
+                  >
+                    DL
+                  </th>
+                  <th
+                    className="py-1.5 px-0.5 font-semibold text-center w-[48px] min-w-[48px] max-w-[48px] sticky left-[86px] bg-slate-100 z-30 shadow-[1px_0_0_0_#e2e8f0] leading-tight text-[10px]"
+                    title="記録リンク"
+                  >
+                    記録<br />リンク
+                  </th>
+                  <th className="py-3 px-3.5 font-semibold whitespace-nowrap">日付</th>
+                  <th className="py-3 px-3 font-semibold text-center">活動区分</th>
+                  <th className="py-3 px-3.5 font-semibold">ｱｸﾃｨﾋﾞﾃｨ</th>
+                  <th className="py-3 px-3.5 font-semibold w-[200px] min-w-[200px] max-w-[200px]">
+                    タイトル
+                  </th>
+                  <th className="py-3 px-3.5 font-semibold w-[200px] min-w-[200px] max-w-[200px]">
+                    主な訪問地
+                  </th>
+                  <th className="py-3 px-3.5 font-semibold w-[100px] min-w-[100px] max-w-[100px]">都道府県</th>
+                  <th className="py-3 px-3 font-semibold w-[100px] min-w-[100px] max-w-[100px]">
+                    補足
+                  </th>
+                  <th className="py-3 px-3.5 font-semibold text-right">距離［km］</th>
+                  <th className="py-3 px-3.5 font-semibold text-right min-w-[110px]">
+                    獲得標高［m］
+                  </th>
+                  <th className="py-3 px-3.5 font-semibold text-right">走行・歩行時間</th>
+                  <th className="py-3 px-3.5 font-semibold">車種</th>
+                  <th className="py-3 px-3.5 font-semibold">メーカー</th>
+                  <th className="py-3 px-3.5 font-semibold">モデル</th>
                 </tr>
-              ) : (
-                filteredRecords.map((r) => {
-                  const elevPct = r.elevVal ? Math.min(100, (r.elevVal / maxElevValue) * 100) : 0;
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredRecords.length === 0 ? (
+                  <tr>
+                    <td colSpan={16} className="py-14 text-center text-slate-400">
+                      {isLoadingCsv ? (
+                        <div className="flex flex-col items-center gap-2">
+                          <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                          <span className="text-xs font-medium text-slate-600">データを読み込み中...</span>
+                        </div>
+                      ) : (
+                        <span className="text-xs font-medium">該当する記録が見つかりませんでした。条件を変更してください。</span>
+                      )}
+                    </td>
+                  </tr>
+                ) : (
+                  displayedRecords.map((r) => {
+                    const elevPct = r.elevVal ? Math.min(100, (r.elevVal / maxElevValue) * 100) : 0;
 
-                  return (
-                    <tr
-                      key={r.id}
-                      onClick={() => setSelectedActivity(r)}
-                      title="行をクリックすると詳細情報と地図を表示します"
-                      className="hover:bg-blue-50/50 cursor-pointer transition-colors duration-100 group border-b border-slate-100 last:border-0"
-                    >
+                    return (
+                      <tr
+                        key={r.id}
+                        onClick={() => setSelectedActivity(r)}
+                        title="行をクリックすると詳細情報と地図を表示します"
+                        className="hover:bg-blue-50/50 cursor-pointer transition-colors duration-75 group border-b border-slate-100 last:border-0"
+                      >
                       {/* 詳細ボタン (Sticky Left: left-0) */}
                       <td
                         className="py-2 px-1 text-center sticky left-0 bg-white group-hover:bg-[#F4F8FD] z-10 transition-colors w-[48px] min-w-[48px] max-w-[48px]"
@@ -721,7 +757,92 @@ export default function App() {
             </tbody>
           </table>
         </div>
-      </main>
+
+        {/* Table Pagination & Display Toolbar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 bg-slate-50 border-t border-slate-200 text-xs text-slate-600 shrink-0">
+          <div className="flex items-center gap-2 font-medium">
+            <span>
+              {filteredRecords.length > 0 ? (
+                <>
+                  <strong className="text-slate-900 font-mono">
+                    {pageSize === -1
+                      ? `1〜${filteredRecords.length}`
+                      : `${(validCurrentPage - 1) * pageSize + 1}〜${Math.min(validCurrentPage * pageSize, filteredRecords.length)}`}
+                  </strong>
+                  <span className="text-slate-400 mx-1">/</span>
+                  <span>全 <strong className="text-slate-900 font-mono">{filteredRecords.length.toLocaleString()}</strong> 件</span>
+                </>
+              ) : (
+                '0 件'
+              )}
+            </span>
+          </div>
+
+          {/* Page Navigation */}
+          {pageSize !== -1 && totalPages > 1 && (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setCurrentPage(1)}
+                disabled={validCurrentPage <= 1}
+                className="p-1 rounded-lg border border-slate-200 text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-white hover:text-slate-900 transition"
+                title="最初のページ"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={validCurrentPage <= 1}
+                className="px-2 py-1 rounded-lg border border-slate-200 text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-white hover:text-slate-900 transition flex items-center gap-1 font-medium"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">前へ</span>
+              </button>
+              <span className="px-3 py-1 font-mono font-bold text-slate-800 bg-white border border-slate-200 rounded-lg shadow-2xs">
+                {validCurrentPage} / {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={validCurrentPage >= totalPages}
+                className="px-2 py-1 rounded-lg border border-slate-200 text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-white hover:text-slate-900 transition flex items-center gap-1 font-medium"
+              >
+                <span className="hidden sm:inline">次へ</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={validCurrentPage >= totalPages}
+                className="p-1 rounded-lg border border-slate-200 text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-white hover:text-slate-900 transition"
+                title="最後のページ"
+              >
+                <ChevronsRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {/* Page Size Selector */}
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 hidden sm:inline">1ページの表示数:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setCurrentPage(1);
+              }}
+              className="h-7 px-2 border border-slate-200 rounded-lg bg-white text-slate-700 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-2xs"
+            >
+              <option value={50}>50 件</option>
+              <option value={100}>100 件</option>
+              <option value={200}>200 件</option>
+              <option value={-1}>すべて表示</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </main>
 
       {/* Activity Detail Window (Modal Window on Row Click) */}
       <ActivityDetailWindow
