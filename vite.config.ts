@@ -142,5 +142,5 @@ export default defineConfig(() => {
 
 export default defineConfig({
   plugins: [react()],
-  base: '/cycling-climbing-record/', // 👈 これを追記します（前後にスラッシュが必要です）
+  base: './', // 👈 これを追記します（前後にスラッシュが必要です）
 })
