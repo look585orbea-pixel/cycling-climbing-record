@@ -27,6 +27,7 @@ export interface GpxPoint {
   lng: number;
   ele?: number;
   time?: string;
+  distKm?: number;
 }
 
 export interface GpxTrack {

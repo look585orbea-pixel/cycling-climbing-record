@@ -76,6 +76,7 @@ export function generateSampleGpxTrack(
       lng: Number(curLng.toFixed(6)),
       ele: Math.round(curElev),
       time: new Date(Date.now() - (numPoints - i) * 60000).toISOString(),
+      distKm: Number((progress * dist).toFixed(2)),
     });
   }
 

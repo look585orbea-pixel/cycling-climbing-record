@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ActivityRecord, GpxTrack } from '../types';
+import { ActivityRecord, GpxTrack, GpxPoint } from '../types';
 import { LeafletMapView } from './LeafletMapView';
 import { ElevationProfile } from './ElevationProfile';
 import { parseGpxXml, convertGoogleDriveUrl, getGoogleDriveDownloadUrl } from '../utils/gpxParser';
-import { generateSampleGpxTrack } from '../data/sampleGpx';
+import { getFirstPrefectureName } from '../utils/prefectureBounds';
 import { ServiceIcon } from './ServiceIcon';
 import { renderColorizedEmoji } from '../utils/emojiRenderer';
 import {
@@ -38,6 +38,7 @@ const clientGpxCache = new Map<string, { track: GpxTrack; text: string }>();
 export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ activity, onClose }) => {
   const [gpxTrack, setGpxTrack] = useState<GpxTrack | null>(null);
   const [rawGpxText, setRawGpxText] = useState<string | null>(null);
+  const [highlightPoint, setHighlightPoint] = useState<GpxPoint | null>(null);
   const [isLoadingGpx, setIsLoadingGpx] = useState(false);
   const [downloadingGpx, setDownloadingGpx] = useState(false);
   const [gpxError, setGpxError] = useState<string | null>(null);
@@ -45,6 +46,7 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
   const [activeTab, setActiveTab] = useState<'map' | 'info'>('map');
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const firstPrefecture = activity ? getFirstPrefectureName(activity) : null;
 
   const handleDownloadGpx = async () => {
     if (!activity?.gpsLogUrl) return;
@@ -199,44 +201,24 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
           // Save to client cache
           clientGpxCache.set(cacheKey, { track: parsed, text });
         } else {
-          // If network fetch failed to get direct XML, display realistic matching route
-          const fallback = generateSampleGpxTrack(
-            activity.title,
-            activity.distVal || 35,
-            activity.elevVal || 800,
-            activity.prefStr,
-            activity.spots
-          );
-          setGpxTrack(fallback);
-          setGpxError('Google DriveからのGPX取得に失敗したため、推定ルートを表示しています。');
+          setGpxTrack(null);
+          setGpxError('Google DriveからのGPX取得に失敗しました。');
         }
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         console.warn('GPX load note:', err.message);
-        const fallback = generateSampleGpxTrack(
-          activity.title,
-          activity.distVal || 35,
-          activity.elevVal || 800,
-          activity.prefStr,
-          activity.spots
-        );
-        setGpxTrack(fallback);
-        setGpxError('Google DriveからのGPX取得に失敗したため、推定ルートを表示しています。');
+        setGpxTrack(null);
+        setGpxError('Google DriveからのGPX取得に失敗しました。');
       } finally {
         if (!controller.signal.aborted) {
           setIsLoadingGpx(false);
         }
       }
     } else {
-      // Activity has no GPS link, generate route based on stats
-      const fallback = generateSampleGpxTrack(
-        activity.title,
-        activity.distVal || 35,
-        activity.elevVal || 800,
-        activity.prefStr,
-        activity.spots
-      );
-      setGpxTrack(fallback);
+      // 記録リンク（GPSログURL）が無い場合：
+      // 地図表示に対して線をプロットせず、その都道府県全体を表示する
+      setGpxTrack(null);
+      setRawGpxText(null);
       setGpxError(null);
       setIsLoadingGpx(false);
     }
@@ -388,10 +370,16 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
                   <span className="font-semibold text-slate-700 text-sm">GPXログデータを読み込み中...</span>
                   <span className="text-slate-400 text-xs">ルートと標高データを取得・解析しています</span>
                 </div>
-              ) : gpxTrack && gpxTrack.points.length > 0 ? (
+              ) : (
                 <>
-                  <LeafletMapView track={gpxTrack} activityTitle={activity.title} />
-                  {gpxError && (
+                  <LeafletMapView
+                    track={gpxTrack}
+                    activityTitle={activity.title}
+                    currentPoint={highlightPoint}
+                    prefecture={firstPrefecture}
+                  />
+
+                  {gpxError && activity.gpsLogUrl && (
                     <div className="absolute top-3 left-3 right-3 z-1000 bg-amber-500/95 text-white px-3.5 py-2 rounded-xl text-xs flex items-center justify-between shadow-lg backdrop-blur-xs">
                       <div className="flex items-center gap-2 pr-2">
                         <AlertCircle className="w-4 h-4 shrink-0 text-amber-100" />
@@ -405,38 +393,17 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
                       </button>
                     </div>
                   )}
-                </>
-              ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-50 p-6 text-center">
-                  <div className="w-12 h-12 rounded-full bg-slate-200/70 flex items-center justify-center text-slate-400 mb-3">
-                    <MapPin className="w-6 h-6 text-slate-400" />
-                  </div>
-                  <div className="text-sm font-bold text-slate-800 mb-1">
-                    {gpxError || (activity.gpsLogUrl ? 'GPXログの読み込みに失敗しました' : 'GPSログ（GPXデータ）がありません')}
-                  </div>
-                  <p className="text-xs text-slate-500 max-w-sm mb-4 leading-relaxed">
-                    {activity.gpsLogUrl
-                      ? 'GPSログの直接取得ができなかった場合は、再試行するか、お持ちの.gpxファイルを直接読み込んでください。'
-                      : 'お手元に.gpxファイルがある場合は、下のボタンから読み込んでルートを表示できます。'}
-                  </p>
-                  <div className="flex items-center gap-2">
-                    {activity.gpsLogUrl && (
-                      <button
-                        type="button"
-                        onClick={loadGpx}
-                        className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs transition cursor-pointer"
-                      >
-                        再試行
-                      </button>
-                    )}
+
+                  {/* Upload GPX overlay button */}
+                  <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2">
                     <label
-                      htmlFor="gpx-file-input-fallback"
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold border border-slate-300 shadow-2xs cursor-pointer transition"
+                      htmlFor="gpx-file-input"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold rounded-xl shadow-sm border border-slate-200/80 cursor-pointer backdrop-blur-xs transition"
                     >
                       <Upload className="w-3.5 h-3.5 text-slate-500" />
                       <span>.gpxファイルを読込</span>
                       <input
-                        id="gpx-file-input-fallback"
+                        id="gpx-file-input"
                         type="file"
                         accept=".gpx,application/gpx+xml,text/xml"
                         onChange={handleFileUpload}
@@ -444,27 +411,7 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
                       />
                     </label>
                   </div>
-                </div>
-              )}
-
-              {/* Upload GPX overlay button when track is shown */}
-              {gpxTrack && (
-                <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2">
-                  <label
-                    htmlFor="gpx-file-input"
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white/95 hover:bg-white text-slate-700 text-xs font-semibold rounded-xl shadow-sm border border-slate-200/80 cursor-pointer backdrop-blur-xs transition"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-slate-500" />
-                    <span>.gpxファイルを読込</span>
-                    <input
-                      id="gpx-file-input"
-                      type="file"
-                      accept=".gpx,application/gpx+xml,text/xml"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
+                </>
               )}
             </div>
 
@@ -477,6 +424,8 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
                   elevationGainM={gpxTrack.elevationGainM}
                   maxElevationM={gpxTrack.maxElevationM}
                   minElevationM={gpxTrack.minElevationM}
+                  selectedPoint={highlightPoint}
+                  onPointSelect={setHighlightPoint}
                 />
               </div>
             )}

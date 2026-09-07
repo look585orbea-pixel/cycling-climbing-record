@@ -104,6 +104,7 @@ export function parseGpxXml(xmlText: string): GpxTrack {
         elevationGainM += p.ele - prev.ele;
       }
     }
+    p.distKm = Math.round(totalDistanceKm * 100) / 100;
   }
 
   return {

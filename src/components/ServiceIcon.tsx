@@ -17,7 +17,7 @@ export const ServiceIcon: React.FC<ServiceIconProps> = ({
   if (isYamap) {
     return (
       <img
-        src="/YAMAPアイコン.jpg"
+        src="./YAMAPアイコン.jpg"
         alt="YAMAP"
         width={size}
         height={size}
@@ -35,7 +35,7 @@ export const ServiceIcon: React.FC<ServiceIconProps> = ({
   if (isGarmin) {
     return (
       <img
-        src="/GARMINアイコン.jpg"
+        src="./GARMINアイコン.jpg"
         alt="GARMIN"
         width={size}
         height={size}
