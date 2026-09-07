@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ActivityRecord } from './types';
 import { parseCsv } from './utils/csvParser';
-import { getGoogleDriveDownloadUrl, convertGoogleDriveUrl } from './utils/gpxParser';
+import { getGoogleDriveDownloadUrl, convertGoogleDriveUrl, getCandidateGpxUrls } from './utils/gpxParser';
 import { ActivityDetailWindow } from './components/ActivityDetailWindow';
 import { PrefectureModal } from './components/PrefectureModal';
 import { ServiceIcon } from './components/ServiceIcon';
@@ -206,8 +206,6 @@ export default function App() {
     const cleanDate = r.dateStr ? r.dateStr.replace(/[^0-9]/g, '') : '';
     const filename = cleanDate ? `${cleanDate}.gpx` : 'activity.gpx';
 
-    const directUrl = getGoogleDriveDownloadUrl(r.gpsLogUrl) || convertGoogleDriveUrl(r.gpsLogUrl) || r.gpsLogUrl;
-
     const triggerBlobDownload = (blob: Blob, name: string) => {
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -221,25 +219,30 @@ export default function App() {
       }, 300);
     };
 
-    try {
-      // 1. Direct fetch from Google Drive (CORS enabled, original raw GPX file)
-      const res = await fetch(directUrl);
-      if (res.ok) {
-        const text = await res.text();
-        if (text.includes('<gpx') || text.includes('<?xml')) {
-          const blob = new Blob([text], { type: 'application/gpx+xml;charset=utf-8' });
-          triggerBlobDownload(blob, filename);
-          setTimeout(() => setDownloadingId(null), 1000);
-          return;
+    // 1. Try candidate URLs (local relative static paths ./gpx/${filename}, ./${filename}, direct Google Drive URLs)
+    const candidateUrls = getCandidateGpxUrls(r.gpsLogUrl, r.dateStr);
+    for (const url of candidateUrls) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const text = await res.text();
+          if (text.includes('<gpx') || text.includes('<?xml')) {
+            const blob = new Blob([text], { type: 'application/gpx+xml;charset=utf-8' });
+            triggerBlobDownload(blob, filename);
+            setTimeout(() => setDownloadingId(null), 1000);
+            return;
+          }
         }
+      } catch (e) {
+        // Try next candidate
       }
-    } catch (e) {
-      console.warn('Direct fetch from Google Drive usercontent had restriction:', e);
     }
 
+    // 2. Server proxy fallback if available (using relative path compatible with GitHub Pages / subpaths)
     try {
-      // 2. Server proxy fallback if available
-      const proxyUrl = `/api/gpx-download?url=${encodeURIComponent(r.gpsLogUrl)}&filename=${filename}`;
+      const baseUrl = import.meta.env.BASE_URL || './';
+      const cleanBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+      const proxyUrl = `${cleanBase}api/gpx-download?url=${encodeURIComponent(r.gpsLogUrl)}&filename=${filename}`;
       const pRes = await fetch(proxyUrl);
       if (pRes.ok) {
         const text = await pRes.text();
@@ -251,10 +254,11 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.warn('Proxy fetch failed:', e);
+      console.warn('Proxy fetch note:', e);
     }
 
     // 3. Fallback: Native browser download directly from Google Drive URL
+    const directUrl = getGoogleDriveDownloadUrl(r.gpsLogUrl) || convertGoogleDriveUrl(r.gpsLogUrl) || r.gpsLogUrl;
     const a = document.createElement('a');
     a.href = directUrl;
     a.download = filename;

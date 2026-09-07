@@ -156,6 +156,58 @@ export function getGoogleDriveDownloadUrl(url: string): string | null {
   return null;
 }
 
+/**
+ * Resolves all candidate URLs / paths for a given GPX log entry,
+ * prioritizing relative paths (./) for GitHub Pages compatibility.
+ */
+export function getCandidateGpxUrls(gpsLogUrl?: string | null, dateStr?: string | null): string[] {
+  const candidates: string[] = [];
+  const cleanDate = dateStr ? dateStr.replace(/[^0-9]/g, '') : '';
+  const dateTrimmed = dateStr ? dateStr.trim() : '';
+
+  // 1. If gpsLogUrl is specified as a local file or relative/absolute path:
+  // e.g. "gpx/20090221.gpx", "/gpx/20090221.gpx", "./gpx/20090221.gpx", "20090221.gpx"
+  if (gpsLogUrl && !/^(https?:|\/\/|data:|blob:)/i.test(gpsLogUrl.trim())) {
+    const raw = gpsLogUrl.trim();
+    // Strip leading slashes to prevent root-domain resolution on GitHub Pages
+    const stripped = raw.replace(/^\/+/, '');
+    const rel = stripped.startsWith('./') ? stripped : `./${stripped}`;
+    candidates.push(rel);
+
+    if (!stripped.startsWith('gpx/')) {
+      candidates.push(`./gpx/${stripped}`);
+    }
+  }
+
+  // 2. Local static GPX files in repository (vital for GitHub Pages static hosting):
+  // Checks if the user uploaded YYYYMMDD.gpx into ./gpx/ or the root repository folder
+  if (cleanDate) {
+    candidates.push(`./gpx/${cleanDate}.gpx`);
+    candidates.push(`./${cleanDate}.gpx`);
+  }
+  if (dateTrimmed && dateTrimmed !== cleanDate) {
+    candidates.push(`./gpx/${dateTrimmed}.gpx`);
+    candidates.push(`./${dateTrimmed}.gpx`);
+  }
+
+  // 3. Google Drive download URLs (with CORS enabled)
+  if (gpsLogUrl && (gpsLogUrl.includes('drive.google.com') || gpsLogUrl.includes('docs.google.com') || gpsLogUrl.includes('drive.usercontent.google.com'))) {
+    const match = gpsLogUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || gpsLogUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) {
+      const fileId = match[1];
+      candidates.push(`https://drive.usercontent.google.com/download?id=${fileId}&export=download`);
+      candidates.push(`https://drive.google.com/uc?export=download&id=${fileId}`);
+      candidates.push(`https://docs.google.com/uc?export=download&id=${fileId}`);
+      candidates.push(`https://drive.google.com/uc?export=download&confirm=t&id=${fileId}`);
+    }
+  } else if (gpsLogUrl && /^(https?:|\/\/)/i.test(gpsLogUrl.trim())) {
+    candidates.push(gpsLogUrl.trim());
+  }
+
+  // Deduplicate while maintaining priority order
+  return Array.from(new Set(candidates));
+}
+
 function escapeXml(str: string): string {
   return str
     .replace(/&/g, '&amp;')

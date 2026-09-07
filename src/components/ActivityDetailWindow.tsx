@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ActivityRecord, GpxTrack, GpxPoint } from '../types';
 import { LeafletMapView } from './LeafletMapView';
 import { ElevationProfile } from './ElevationProfile';
-import { parseGpxXml, convertGoogleDriveUrl, getGoogleDriveDownloadUrl } from '../utils/gpxParser';
+import { parseGpxXml, convertGoogleDriveUrl, getGoogleDriveDownloadUrl, getCandidateGpxUrls } from '../utils/gpxParser';
 import { getFirstPrefectureName } from '../utils/prefectureBounds';
 import { ServiceIcon } from './ServiceIcon';
 import { renderColorizedEmoji } from '../utils/emojiRenderer';
@@ -74,22 +74,28 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
       return;
     }
 
-    try {
-      const directUrl = getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl) || activity.gpsLogUrl;
-      const res = await fetch(directUrl);
-      if (res.ok) {
-        const text = await res.text();
-        if (text.includes('<gpx') || text.includes('<?xml')) {
-          triggerBlob(text);
-          return;
+    // 1. Try candidate URLs (relative paths in repo: ./gpx/${filename}, ./${filename}, Google Drive direct)
+    const candidateUrls = getCandidateGpxUrls(activity.gpsLogUrl, activity.dateStr);
+    for (const url of candidateUrls) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const text = await res.text();
+          if (text.includes('<gpx') || text.includes('<?xml')) {
+            triggerBlob(text);
+            return;
+          }
         }
+      } catch (e) {
+        // Continue to next candidate
       }
-    } catch (e) {
-      console.warn(e);
     }
 
+    // 2. Try proxy with relative base URL
     try {
-      const proxyUrl = `/api/gpx-download?url=${encodeURIComponent(activity.gpsLogUrl)}&filename=${filename}`;
+      const baseUrl = import.meta.env.BASE_URL || './';
+      const cleanBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+      const proxyUrl = `${cleanBase}api/gpx-download?url=${encodeURIComponent(activity.gpsLogUrl)}&filename=${filename}`;
       const pRes = await fetch(proxyUrl);
       if (pRes.ok) {
         const text = await pRes.text();
@@ -99,10 +105,11 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
         }
       }
     } catch (e) {
-      console.warn(e);
+      console.warn('Proxy download note:', e);
     }
 
-    window.open(activity.gpsLogUrl, '_blank');
+    const directUrl = getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl) || activity.gpsLogUrl;
+    window.open(directUrl, '_blank');
     setDownloadingGpx(false);
   };
 
@@ -134,59 +141,74 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
       setRawGpxText(null);
 
       try {
-        const directUrl = getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl) || activity.gpsLogUrl;
         let text = '';
+        const candidateUrls = getCandidateGpxUrls(activity.gpsLogUrl, activity.dateStr);
 
-        // 1. Server-side proxy FIRST (Handles Google Drive downloads and CORS in dev AND production)
-        try {
-          const proxyUrl = `/api/gpx-proxy?url=${encodeURIComponent(activity.gpsLogUrl)}`;
-          const res = await fetch(proxyUrl, { signal: controller.signal });
-          if (res.ok) {
-            const proxyText = await res.text();
-            if (proxyText.includes('<gpx') || proxyText.includes('<?xml')) {
-              text = proxyText;
-            }
-          }
-        } catch (proxyErr: any) {
-          if (proxyErr.name === 'AbortError') return;
-          console.warn('Backend GPX proxy fetch note:', proxyErr);
-        }
-
-        // 2. Direct fetch fallback if proxy did not return xml
-        if (!text && directUrl && !controller.signal.aborted) {
+        // Step A: Fetch candidate URLs directly.
+        // This handles:
+        // 1) Relative static files in the GitHub Pages repo (e.g. ./gpx/20090221.gpx or ./20090221.gpx)
+        // 2) Direct Google Drive download URLs with CORS enabled (drive.usercontent.google.com)
+        // 3) Relative paths from CSV (e.g. gpx/foo.gpx normalized to ./gpx/foo.gpx)
+        for (const url of candidateUrls) {
+          if (controller.signal.aborted) return;
           try {
-            const res = await fetch(directUrl, { signal: controller.signal });
+            const res = await fetch(url, { signal: controller.signal });
             if (res.ok) {
-              const directText = await res.text();
-              if (directText.includes('<gpx') || directText.includes('<?xml')) {
-                text = directText;
+              const fetchedText = await res.text();
+              if (fetchedText.includes('<gpx') || fetchedText.includes('<?xml')) {
+                text = fetchedText;
+                break;
               }
             }
           } catch (fetchErr: any) {
             if (fetchErr.name === 'AbortError') return;
-            console.warn('Direct GPX fetch note:', fetchErr);
           }
         }
 
-        // 3. Fallback to public CORS proxies if still no text
-        if (!text && directUrl && !controller.signal.aborted) {
-          const corsProxies = [
-            `https://corsproxy.io/?url=${encodeURIComponent(directUrl)}`,
-            `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`,
-          ];
-          for (const cProxy of corsProxies) {
-            if (controller.signal.aborted) return;
-            try {
-              const res = await fetch(cProxy, { signal: controller.signal });
-              if (res.ok) {
-                const proxyText = await res.text();
-                if (proxyText.includes('<gpx') || proxyText.includes('<?xml')) {
-                  text = proxyText;
-                  break;
-                }
+        // Step B: Try backend proxy if available (using relative path compatible with GitHub Pages subpath)
+        if (!text && !controller.signal.aborted) {
+          try {
+            const baseUrl = import.meta.env.BASE_URL || './';
+            const cleanBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+            const proxyUrl = `${cleanBase}api/gpx-proxy?url=${encodeURIComponent(activity.gpsLogUrl)}`;
+            const res = await fetch(proxyUrl, { signal: controller.signal });
+            if (res.ok) {
+              const proxyText = await res.text();
+              if (proxyText.includes('<gpx') || proxyText.includes('<?xml')) {
+                text = proxyText;
               }
-            } catch (cpErr: any) {
-              if (cpErr.name === 'AbortError') return;
+            }
+          } catch (proxyErr: any) {
+            if (proxyErr.name === 'AbortError') return;
+            console.warn('Backend GPX proxy note:', proxyErr);
+          }
+        }
+
+        // Step C: Fallback to public CORS proxies if still no text (e.g. for Google Drive URLs on GitHub Pages)
+        if (!text && !controller.signal.aborted) {
+          const directDriveUrl = getGoogleDriveDownloadUrl(activity.gpsLogUrl) || convertGoogleDriveUrl(activity.gpsLogUrl);
+          if (directDriveUrl) {
+            const corsProxies = [
+              `https://corsproxy.io/?url=${encodeURIComponent(directDriveUrl)}`,
+              `https://api.allorigins.win/raw?url=${encodeURIComponent(directDriveUrl)}`,
+            ];
+            for (const cProxy of corsProxies) {
+              if (controller.signal.aborted) return;
+              try {
+                const proxyController = new AbortController();
+                const timeoutId = setTimeout(() => proxyController.abort(), 4000);
+                const res = await fetch(cProxy, { signal: proxyController.signal });
+                clearTimeout(timeoutId);
+                if (res.ok) {
+                  const proxyText = await res.text();
+                  if (proxyText.includes('<gpx') || proxyText.includes('<?xml')) {
+                    text = proxyText;
+                    break;
+                  }
+                }
+              } catch (cpErr: any) {
+                if (cpErr.name === 'AbortError') return;
+              }
             }
           }
         }
@@ -202,13 +224,13 @@ export const ActivityDetailWindow: React.FC<ActivityDetailWindowProps> = ({ acti
           clientGpxCache.set(cacheKey, { track: parsed, text });
         } else {
           setGpxTrack(null);
-          setGpxError('Google DriveからのGPX取得に失敗しました。');
+          setGpxError('GPXデータの取得に失敗しました。');
         }
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         console.warn('GPX load note:', err.message);
         setGpxTrack(null);
-        setGpxError('Google DriveからのGPX取得に失敗しました。');
+        setGpxError('GPXデータの取得に失敗しました。');
       } finally {
         if (!controller.signal.aborted) {
           setIsLoadingGpx(false);
