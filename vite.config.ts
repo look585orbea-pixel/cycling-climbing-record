@@ -113,6 +113,7 @@ function gpxProxyPlugin(): Plugin {
 
 export default defineConfig(() => {
   return {
+    base: './', // 追記
     plugins: [react(), tailwindcss(), gpxProxyPlugin()],
     resolve: {
       alias: {
@@ -140,7 +141,3 @@ export default defineConfig(() => {
   };
 });
 
-export default defineConfig({
-  plugins: [react()],
-  base: './', // 👈 これを追記します（前後にスラッシュが必要です）
-})
